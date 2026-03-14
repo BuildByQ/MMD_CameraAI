@@ -19,6 +19,46 @@
   "camera_features": [
     "pos_x","pos_y","pos_z","rot_x_speed","rot_x_sin","rot_x_cos","rot_y_speed","rot_y_sin","rot_y_cos","rot_z_speed","rot_z_sin","rot_z_cos","distance","fov"
   ],
+  "camera_columns": [
+    "フレーム番号",
+    "距離",
+    "設置座標x",
+    "設置座標y",
+    "設置座標z",
+    "回転x",
+    "回転y",
+    "回転z",
+    "視野角",
+    "パース"
+  ],
+  "virtual_bone_definitions": {
+    "頭": {
+      "offset": [0.0, 0.0, 10.0],
+      "suffix": "前方"
+    },
+    "上半身": {
+      "offset": [0.0, 0.0, 10.0],
+      "suffix": "前方"
+    },
+    "下半身": {
+      "offset": [0.0, 0.0, 10.0],
+      "suffix": "前方"
+    }
+  },
+  "anchor_definitions": {
+    "target_head": {
+      "labels": ["bin_target_head_focused", "bin_target_head_focused_strict"],
+      "bones": ["頭"]
+    },
+    "target_body": {
+      "labels": ["bin_target_body_focused", "bin_target_body_focused_strict"],
+      "bones": ["上半身"]
+    },
+    "target_leg": {
+      "labels": ["bin_target_leg_focused", "bin_target_leg_focused_strict"],
+      "bones": ["右足首", "左足首"]
+    }
+  },
   "motion_features": [
     "グルーブ_w_x",
     "グルーブ_w_y",
