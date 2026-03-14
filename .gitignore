@@ -1,0 +1,14 @@
+/.venv
+/.vscode
+/data
+/models
+/myenv
+/predict_01
+/results
+/utils
+/doc
+data_convert/*
+!data_convert/*.py
+/ml/config.json
+*.csv
+*.txt
