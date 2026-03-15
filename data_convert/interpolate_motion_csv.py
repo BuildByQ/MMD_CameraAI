@@ -13,16 +13,6 @@ PROJECT_ROOT = Path(__file__).parent
 ML_ROOT = PROJECT_ROOT.parent / 'ml'
 MODEL_ROOT = PROJECT_ROOT.parent / 'data' / 'mmd_model'
 project_root_str = str(Path(__file__).parent.parent)
-DIRECTIONAL_OFFSETS = {
-    '頭': 'head_front',
-    '上半身': 'upper_body_front',
-    '下半身': 'lower_body_front'
-}
-OFFSET_VALUE = 5.0  # 前方に置く仮想点の距離
-
-# ============================================================
-# ユーティリティ
-# ============================================================
 
 def quat_to_matrix(q):
     """クォータニオン(x, y, z, w)から4x4行列を生成"""
@@ -40,10 +30,6 @@ def quat_to_matrix(q):
     m[1, 0] = 2.0 * (xy + wz); m[1, 1] = 1.0 - 2.0 * (xx + zz); m[1, 2] = 2.0 * (yz - wx)
     m[2, 0] = 2.0 * (xz - wy); m[2, 1] = 2.0 * (yz + wx); m[2, 2] = 1.0 - 2.0 * (xx + yy)
     return m
-
-# ============================================================
-# ボーン・モデル定義
-# ============================================================
 
 class Bone:
     def __init__(self, name, index, parent_index, local_position):
@@ -98,10 +84,6 @@ class FKModel:
         for b in sorted(self.bones.values(), key=lambda x: x.index):
             b.update_matrix()
 
-# ============================================================
-# 補間処理
-# ============================================================
-
 def interpolate_bone_frames(df: pd.DataFrame) -> pd.DataFrame:
     result_rows = []
     for bone_name, bone_data in df.groupby('bone_name'):
@@ -129,10 +111,6 @@ def interpolate_bone_frames(df: pd.DataFrame) -> pd.DataFrame:
                     result_rows.append(interp)
         result_rows.append(bone_data.iloc[-1])
     return pd.DataFrame(result_rows).sort_values(['frame', 'bone_name'])
-
-# ============================================================
-# メイン処理
-# ============================================================
 
 def generate_world_coords_dataset(pmx_data, vmd_csv_path, json_path, output_path):
     with open(json_path, 'r', encoding='utf-8') as f:
@@ -162,14 +140,20 @@ def generate_world_coords_dataset(pmx_data, vmd_csv_path, json_path, output_path
         for b_name in target_bones:
             pos = model.bones[b_name].world_position if b_name in model.bones else [0,0,0]
             res[f"{b_name}_w_x"], res[f"{b_name}_w_y"], res[f"{b_name}_w_z"] = pos
-        # B. 【新規追加】 向き判定用の仮想ボーン座標の算出
-        for parent_name, virtual_name in DIRECTIONAL_OFFSETS.items():
+
+        virtual_bone_defs = config.get("virtual_bone_definitions", {})
+        for parent_name, settings in virtual_bone_defs.items():
+            # JSONの定義（[0.0, 0.0, 10.0] など）を取得
+            offset = settings.get("offset", [0.0, 0.0, 5.0])
+            suffix = settings.get("suffix", "前方")
+            virtual_name = f"{parent_name}{suffix}" # 例: "頭前方"
+
             if parent_name in model.bones:
                 parent_bone = model.bones[parent_name]
                 
-                # 親ボーンの「ローカルでの前方向(0,0,5)」をワールド行列で変換する
-                # Z軸（第3成分）を前と定義。MMDの仕様に合わせます。
-                front_local = np.array([0, 0, OFFSET_VALUE, 1], dtype=np.float32)
+                # ローカルでのオフセット値をワールド行列で変換
+                # offset[0]:x, offset[1]:y, offset[2]:z
+                front_local = np.array([offset[0], offset[1], offset[2], 1.0], dtype=np.float32)
                 front_world = parent_bone.world_matrix @ front_local
                 
                 res[f"{virtual_name}_w_x"] = front_world[0]

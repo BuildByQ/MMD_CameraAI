@@ -116,9 +116,10 @@ def clean_directories() -> bool:
         PATHS['camera_interpolated_dir'],
         PATHS['motion_csv_dir'],
         PATHS['motion_wide_dir'],
-        PATHS['analysis_result_dir'],  # 追加
-        PATHS['normalization_params_dir'],  # 追加
-        PATHS['label_csv_dir']  # 追加
+        PATHS['analysis_result_dir'],
+        PATHS['normalization_params_dir'],
+        PATHS['label_csv_dir'],
+        PATHS['wav_csv_dir']
     ]
     
     for dir_path in dirs_to_clean:

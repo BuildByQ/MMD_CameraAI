@@ -239,7 +239,7 @@ def process_directory(
         max_frames: Maximum number of frames to extract
     """
     # Find all WAV files
-    wav_files = list(Path(input_dir).glob('**/*.wav'))
+    wav_files = list(Path(input_dir).glob('*.wav'))
     
     if not wav_files:
         print(f"No WAV files found in {input_dir}")

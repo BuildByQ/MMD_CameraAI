@@ -1,11 +1,16 @@
 import pandas as pd
 import numpy as np
 import os
-import json  # 追加
+import json
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
-PRED01_ROOT = PROJECT_ROOT.parent / 'predict_01'  # 1つ上の階層のmlフォルダを指す
+PRED01_ROOT = PROJECT_ROOT.parent / 'predict_01'
+PRED01TO02_ROOT = PROJECT_ROOT.parent / 'predict_01to02'
+
+# 出力先フォルダがなければ作成する
+PRED01TO02_ROOT.mkdir(parents=True, exist_ok=True)
+
 ML_ROOT = PROJECT_ROOT.parent / 'ml'  # 1つ上の階層のmlフォルダを指す
 
 # 制御パラメータ
@@ -73,40 +78,50 @@ def apply_director_polish(section, prob_cols, last_selected, is_first_frame_of_c
         if len(phase) == 0: continue
         
         new_selections = set()
-        for group_name, cols in label_groups.items(): # 引数の label_groups を使用
-            valid_cols = [c for c in cols if c in phase.columns]
-            if not valid_cols: continue
+
+        for group_name, members in label_groups.items():
+            valid_cols = []
             
+            if group_name == "target":
+                # --- ターゲットグループ専用：日本語名を含む全バリエーションを回収 ---
+                for bone_name in members:
+                    # 例: "頭" が含まれ、かつ prob_ で始まるカラムをすべて抽出
+                    # (prob_bin_target_頭_focused_strict 等をまとめて拾う)
+                    matched = [c for c in phase.columns if (c.startswith("prob_") and bone_name in c)]
+                    valid_cols.extend(matched)
+            else:
+                # --- その他のグループ：前方一致または完全一致で回収 ---
+                for m in members:
+                    # jsonに 'prob_' が付いていてもいなくても対応できるように
+                    col_name = m if m.startswith("prob_") else f"prob_{m}"
+                    if col_name in phase.columns:
+                        valid_cols.append(col_name)
+
+            if not valid_cols: continue
+
+            # 以降のスコアリングと排他制御は共通
             avg_probs = {}
             for c in valid_cols:
-                # 1. AIが算出したベースの平均確率
                 p = phase[c].mean()
                 
-                # 2. JSONバイアス（足し算）の適用
-                # カラム名が prob_ か bin_ かに関わらず bias_config から取得
-                bias = bias_config.get(c, bias_config.get(c.replace('prob_', 'bin_'), 0.0))
-                p += bias
+                # バイアス引き当て (jsonのキーは prob_ 無しを想定)
+                bias_key = c.replace('prob_', '')
+                p += bias_config.get(bias_key, 0.0)
                 
-                # 3. 継続性ペナルティの適用
                 if c in current_last_selected:
                     p *= CONTEXT_PENALTY_COEFF
-                
                 avg_probs[c] = p
-            
-            # 代表ラベルの選出（バイアス適用後の値で判定）
+
             if not avg_probs: continue
             best_col = max(avg_probs, key=avg_probs.get)
             
             if avg_probs[best_col] > MIN_PROB_ADOPT:
-                polished.loc[s:e-1, best_col.replace('prob_', 'bin_')] = 1
+                # フラグ立て (prob_ -> bin_)
+                # 例: prob_bin_target_頭... -> bin_bin_target_頭...
+                t_bin_col = best_col.replace('prob_', 'bin_', 1)
+                if t_bin_col in polished.columns:
+                    polished.loc[s:e-1, t_bin_col] = 1
                 new_selections.add(best_col)
-                
-                # 近似ラベル（複数点灯）の判定もバイアス適用後の値で行う
-                for c, p in avg_probs.items():
-                    if c != best_col and (avg_probs[best_col] - p) < NEAR_MISS_RANGE:
-                        if p > MIN_PROB_ADOPT:
-                            polished.loc[s:e-1, c.replace('prob_', 'bin_')] = 1
-                            new_selections.add(c)
         
         current_last_selected = new_selections
 
@@ -119,7 +134,7 @@ def main():
     bias_config = config.get("bias_settings", {})
 
     input_path = os.path.join(PRED01_ROOT, "prediction_full.csv")
-    output_path = os.path.join(PRED01_ROOT, "prediction_stage3_cleaned.csv")
+    output_path = os.path.join(PRED01TO02_ROOT, "director_instruction.csv")
     
     if not os.path.exists(input_path):
         print(f"Error: 入力ファイルが見つかりません: {input_path}")
@@ -154,7 +169,7 @@ def main():
     # 結果の結合と保存
     final_df = pd.concat(cleaned_sections)
     final_df.to_csv(output_path, index=False, encoding="utf-8-sig")
-    print(f"Success! Stage 3 cleaned file created: {output_path}")
+    print(f"パイプライン処理完了: {output_path}")
 
 if __name__ == "__main__":
     main()
