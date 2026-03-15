@@ -320,16 +320,19 @@ def preprocess_full_csv(df, config, song_ids, unknown_idx, device="cpu"):
     X_list = []
     song_idx_list = []
     frame_list = []
+    song_id_str_list = []
 
     print("\n=== 推論用スライディングウィンドウ生成（未知曲対応版） ===")
 
     # df に存在する曲IDをループ（predict 対象の曲だけでも OK）
     for sid in df["song_id"].unique():
-        df_song = df[df["song_id"] == sid].sort_values("frame")
+        df_song = df[df["song_id"] == sid].drop_duplicates(subset=['frame']).sort_values("frame")
+        
         X_song = df_song[feature_cols].values
         frames = df_song["frame"].values
-
         N = len(X_song)
+        
+        print(f"   - song_id={sid}: 修正後フレーム数 {N}")
         if N < seq_len:
             print(f"  - song_id={sid}: フレーム不足のためスキップ")
             continue
@@ -338,7 +341,7 @@ def preprocess_full_csv(df, config, song_ids, unknown_idx, device="cpu"):
         song_stats = df_song[feature_cols].agg(['mean', 'std']).values.flatten()
         stats_broadcast = np.repeat(song_stats.reshape(1, -1), seq_len, axis=0)
 
-        # ★ 未知曲なら unknown_idx を使う
+        # 未知曲なら unknown_idx を使う
         if sid in song_to_idx:
             sid_idx = song_to_idx[sid]
         else:
@@ -353,9 +356,8 @@ def preprocess_full_csv(df, config, song_ids, unknown_idx, device="cpu"):
 
             X_list.append(window_with_stats)
             song_idx_list.append(sid_idx)
-
-            # 中心フレーム番号
             frame_list.append(int(frames[i + center]))
+            song_id_str_list.append(sid)
 
     if len(X_list) == 0:
         raise ValueError("推論用のウィンドウが1つも生成されませんでした。")
@@ -367,7 +369,7 @@ def preprocess_full_csv(df, config, song_ids, unknown_idx, device="cpu"):
     print(f"\n生成された総シーケンス数: {len(X_tensor)}")
     print(f"X_tensor shape: {X_tensor.shape}")
 
-    return X_tensor, song_idx_tensor, frame_list
+    return X_tensor, song_idx_tensor, frame_list, song_id_str_list
 
 
 def preprocess_single_frame(df, song_id, frame_index, config, song_ids, unknown_idx, device="cpu"):
@@ -474,7 +476,7 @@ def predict(model, X, song_idx, label_names, threshold=0.5):
         })
     return results
 
-def save_results(results, output_path, label_names, original_frames=None):
+def save_results(results, output_path, label_names, original_frames=None, song_id_list=None):
     """
     推論結果を CSV に保存する（train.py と整合した predict 用）
     results: predict() の返り値（リスト）
@@ -486,6 +488,8 @@ def save_results(results, output_path, label_names, original_frames=None):
     for i, r in enumerate(results):
         row = {}
 
+        if song_id_list is not None:
+            row["song_id"] = song_id_list[i]
         # ① 元のフレーム番号（あれば）
         if original_frames is not None:
             row["frame"] = int(original_frames[i])
@@ -506,7 +510,8 @@ def save_results(results, output_path, label_names, original_frames=None):
         rows.append(row)
 
     df = pd.DataFrame(rows)
-    df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    cols = ["song_id", "frame", "labels"] + [c for c in df.columns if c not in ["song_id", "frame", "labels"]]
+    df[cols].to_csv(output_path, index=False, encoding="utf-8-sig")
 
     print(f"Saved prediction results to {output_path}")
 
@@ -517,6 +522,8 @@ def main():
 
     # 2. 正規化済み CSV を読み込み
     df_full = load_normalized_csvs(config)
+    print(f"DEBUG: df_full の全行数: {len(df_full)}")
+    print(f"DEBUG: フレーム重複チェック: {df_full[df_full['song_id']=='ring_my_bell']['frame'].duplicated().any()}")
 
     # 3. モデル読み込み
     # ここで df_full を渡すことで、学習時と同じ num_songs (3) を計算させます
@@ -542,7 +549,7 @@ def main():
     # 引数に feature_cols=feat_cols を追加し、動的解決したカラムを使わせます
     # song_ids には学習時のリスト（train_songs）を渡し、未知曲判定をさせます
     print("Running full-sequence prediction...")
-    X, song_idx, original_frames = preprocess_full_csv(
+    X, song_idx, original_frames, song_id_list = preprocess_full_csv(
         df_target, config, train_songs, unknown_idx, device=device
     )
 
@@ -557,7 +564,7 @@ def main():
     output_filename = LABEL_ROOT / "prediction_full.csv"
     output_prediction_path = LABEL_ROOT / output_filename
     
-    save_results(results, output_prediction_path, label_cols, original_frames)
+    save_results(results, output_prediction_path, label_cols, original_frames, song_id_list)
 
     print(f"\n=== 全工程完了 ===")
     print(f"結果保存先: {output_prediction_path}")

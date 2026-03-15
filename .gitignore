@@ -9,6 +9,7 @@
 /doc
 data_convert/*
 !data_convert/*.py
-/ml/config.json
 *.csv
 *.txt
+*.pth
+*.json

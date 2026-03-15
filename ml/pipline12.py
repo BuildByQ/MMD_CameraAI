@@ -128,10 +128,9 @@ def apply_director_polish(section, prob_cols, last_selected, is_first_frame_of_c
     return polished, current_last_selected
 
 def main():
-    # 1. JSON設定の読み込み
     config = load_config("config.json")
-    # bias_settings セクションを取得（なければ空の辞書）
     bias_config = config.get("bias_settings", {})
+    label_groups = config.get("label_groups", {})
 
     input_path = os.path.join(PRED01_ROOT, "prediction_full.csv")
     output_path = os.path.join(PRED01TO02_ROOT, "director_instruction.csv")
@@ -140,34 +139,36 @@ def main():
         print(f"Error: 入力ファイルが見つかりません: {input_path}")
         return
 
-    df = pd.read_csv(input_path, encoding="utf-8-sig")
-    
-    # 物理カット（イベントカット）のピーク検出
-    peaks = (df['prob_event_cut'] > df['prob_event_cut'].shift(1)) & \
-            (df['prob_event_cut'] > df['prob_event_cut'].shift(-1))
-    cut_indices = df.index[peaks & (df['prob_event_cut'] > PHYSICAL_CUT_THRESH)].tolist()
-    boundaries = [0] + cut_indices + [len(df)]
+    df_all = pd.read_csv(input_path, encoding="utf-8-sig")
+    all_refined_sections = []
 
-    prob_cols = [c for c in df.columns if c.startswith('prob_') and c != 'prob_event_cut']
-    label_groups = config.get("label_groups", {})
-    cleaned_sections = []
-    global_last_selected = set()
-
-    # セクションごとに演出を磨き上げる
-    for i in range(len(boundaries)-1):
-        start, end = boundaries[i], boundaries[i+1]
-        section = df.iloc[start:end]
-        if len(section) == 0: continue
+    # --- 曲ごとにグループ化してループ ---
+    for sid, df in df_all.groupby("song_id", sort=False):
+        print(f"演出ブラッシュアップ中: {sid} ({len(df)} frames)")
         
-        is_first = (i == 0) or (start in cut_indices)
-        # bias_config を引数に追加
-        refined, global_last_selected = apply_director_polish(
-            section, prob_cols, global_last_selected, is_first, bias_config, label_groups
-        )
-        cleaned_sections.append(refined)
+        # 物理カット検出（曲の中での相対的な位置で計算）
+        peaks = (df['prob_event_cut'] > df['prob_event_cut'].shift(1)) & \
+                (df['prob_event_cut'] > df['prob_event_cut'].shift(-1))
+        
+        cut_indices = df.index[peaks & (df['prob_event_cut'] > PHYSICAL_CUT_THRESH)].tolist()
+        boundaries = [df.index[0]] + cut_indices + [df.index[-1] + 1]
 
-    # 結果の結合と保存
-    final_df = pd.concat(cleaned_sections)
+        prob_cols = [c for c in df.columns if c.startswith('prob_') and c != 'prob_event_cut']
+        global_last_selected = set()
+
+        for i in range(len(boundaries)-1):
+            start, end = boundaries[i], boundaries[i+1]
+            section = df.loc[start:end-1]
+            if len(section) == 0: continue
+            
+            is_first = (i == 0) # 曲の最初、またはカットの最初
+            refined, global_last_selected = apply_director_polish(
+                section, prob_cols, global_last_selected, is_first, bias_config, label_groups
+            )
+            all_refined_sections.append(refined)
+
+    # 全曲分を結合して保存
+    final_df = pd.concat(all_refined_sections)
     final_df.to_csv(output_path, index=False, encoding="utf-8-sig")
     print(f"パイプライン処理完了: {output_path}")
 
