@@ -1,81 +1,16 @@
 import os
 import torch
 import numpy as np
-import json
-import torch.nn.functional as F
-import torch.nn as nn
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any
 from pathlib import Path
-
+from model01 import (
+    load_config, get_dynamic_columns, build_model, CameraLabelGRUModel,
+    ML_ROOT, LABEL_ROOT
+)
+# --- パス設定 ---
 PROJECT_ROOT = Path(__file__).parent
-ML_ROOT = PROJECT_ROOT.parent / "ml"
-LABEL_ROOT = PROJECT_ROOT.parent / 'predict_01' # 1つ上の階層のpredict_01フォルダを指す
-
-def get_dynamic_columns(config: dict, df_columns: list):
-    """JSON設定から実際のCSVヘッダー名を組み立てる"""
-    
-    # 特徴量: ボーン名 -> _w_x, _w_y, _w_z
-    motion_bones = config.get('motion_features', [])
-    motion_feats = [f"{b}{s}" for b in motion_bones for s in ['_w_x', '_w_y', '_w_z']]
-    audio_feats = config.get('audio_features', [])
-    feature_cols = [f for f in (motion_feats + audio_feats) if f in df_columns]
-
-    # ラベル: base + anchor_definitionsからの自動生成
-    base_labels = config.get('labels_features', [])
-    anchor_defs = config.get('anchor_definitions', {})
-    dynamic_labels = []
-    for entry in anchor_defs.values():
-        for b in entry.get("bones", []):
-            dynamic_labels.extend([f"bin_target_{b}_front", f"bin_target_{b}_back", 
-                                   f"bin_target_{b}_focused_strict", f"bin_target_{b}_focused", 
-                                   f"bin_target_{b}_focused_loose"])
-    
-    # 順序を維持して重複排除
-    all_label_list = base_labels + dynamic_labels
-    seen = set()
-    label_cols = [l for l in all_label_list if l in df_columns and not (l in seen or seen.add(l))]
-
-    return feature_cols, label_cols
-
-def get_dynamic_columns(config: dict, df_columns: list):
-    # 特徴量: ボーン名 -> _w_x, _w_y, _w_z
-    motion_bones = config.get('motion_features', [])
-    motion_feats = [f"{b}{s}" for b in motion_bones for s in ['_w_x', '_w_y', '_w_z']]
-    audio_feats = config.get('audio_features', [])
-    feature_cols = [f for f in (motion_feats + audio_feats) if f in df_columns]
-
-    # ラベル解決（train01.py と同じロジック）
-    base_labels = config.get('labels_features', [])
-    anchor_defs = config.get('anchor_definitions', {})
-    dynamic_labels = []
-    for entry in anchor_defs.values():
-        for b in entry.get("bones", []):
-            dynamic_labels.extend([f"bin_target_{b}_front", f"bin_target_{b}_back", 
-                                   f"bin_target_{b}_focused_strict", f"bin_target_{b}_focused", 
-                                   f"bin_target_{b}_focused_loose"])
-    
-    seen = set()
-    label_cols = [l for l in (base_labels + dynamic_labels) if l in df_columns and not (l in seen or seen.add(l))]
-    return feature_cols, label_cols
-
-# 1. 設定読み込み
-def load_config(config_path="config.json"):
-    """
-    設定ファイル（config.json）を読み込んで辞書として返す関数。
-    train01.py の全処理がこの設定を参照する。
-    """
-    config_path = ML_ROOT / config_path
-
-    if not config_path.exists():
-        raise FileNotFoundError(f"設定ファイルが見つかりません: {config_path}")
-
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-
-    print(f"設定を読み込みました: {config_path}")
-    return config
 
 def load_trained_model(config, df, device="cpu", model_path=None):
     if model_path is None:
@@ -121,94 +56,6 @@ def load_trained_model(config, df, device="cpu", model_path=None):
     model.eval()
 
     return model, train_songs, unknown_idx, feature_cols, label_cols
-
-def build_model(config: Dict[str, Any], input_dim: int, output_dim: int, num_songs: int) -> nn.Module:
-    """
-    config の設定に基づいてモデルのインスタンスを生成する。
-    """
-    model_cfg = config.get("model", {})
-
-    model = CameraLabelGRUModel(
-        input_dim=input_dim,
-        output_dim=output_dim,
-        num_songs=num_songs,
-        embed_dim=model_cfg.get("embed_dim", 4),
-        hidden_size=model_cfg.get("hidden_size", 256),
-        num_layers=model_cfg.get("num_layers", 2),
-        dropout=model_cfg.get("dropout", 0.2),
-        bidirectional=model_cfg.get("bidirectional", False),
-    )
-
-    print(f"Model Context: Input={input_dim}, Output={output_dim}, Songs={num_songs}")
-    return model
-
-class CameraLabelGRUModel(nn.Module):
-    def __init__(
-        self,
-        input_dim,          # 統計量込みの特徴量次元
-        output_dim,         # ラベル数
-        num_songs,          # 曲数（embedding 用）
-        embed_dim=4,        # 小さくして過学習を防ぐ
-        hidden_size=256,
-        num_layers=2,
-        dropout=0.5,
-        bidirectional=False
-    ):
-        super().__init__()
-
-        # ★ song_id embedding（方式A）
-        self.song_embedding = nn.Embedding(num_songs, embed_dim)
-        nn.init.xavier_uniform_(self.song_embedding.weight)  # 安定化のための初期化
-
-        self.embed_dim = embed_dim
-
-        # ★ embedding dropout（ID丸暗記を防ぐ）
-        self.embed_dropout = nn.Dropout(0.3)
-
-        # ★ GRU の入力次元は「特徴量 + embedding」
-        self.gru = nn.GRU(
-            input_size=input_dim + embed_dim,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0,
-            bidirectional=bidirectional,
-        )
-
-        gru_out_dim = hidden_size * (2 if bidirectional else 1)
-
-        # 最終 hidden → ラベル
-        self.fc = nn.Linear(gru_out_dim, output_dim)
-
-    def forward(self, x, song_idx):
-        """
-        x: (batch, seq_len, input_dim)
-        song_idx: (batch,)
-        """
-
-        # song embedding を取得
-        song_emb = self.song_embedding(song_idx)  # (batch, embed_dim)
-
-        # embedding を L2 正規化（暴走防止）
-        song_emb = F.normalize(song_emb, dim=1)
-
-        # dropout（ID丸暗記を防ぐ）
-        song_emb = self.embed_dropout(song_emb)
-
-        # seq_len にブロードキャスト
-        song_emb = song_emb.unsqueeze(1).repeat(1, x.size(1), 1)
-
-        # 特徴量と embedding を concat
-        x = torch.cat([x, song_emb], dim=2)
-
-        # GRU
-        out, h = self.gru(x)
-
-        # 最後の hidden を使用
-        last_hidden = h[-1]  # (batch, hidden)
-
-        logits = self.fc(last_hidden)
-        return logits
 
 # 2. 正規化済み CSV を読み込み
 def load_normalized_csvs(config: Dict[str, Any]) -> pd.DataFrame:
@@ -456,11 +303,11 @@ def preprocess_single_frame(df, song_id, frame_index, config, song_ids, unknown_
     return X_tensor, song_idx_tensor
 
 
-def predict(model, X, song_idx, label_names, threshold=0.5):
-    model.eval()
+def predict(model, X, song_idx, label_names, threshold=0.5, temperature=1.5):
+    model.train()
     with torch.no_grad():
         logits = model(X, song_idx)
-        probs = torch.sigmoid(logits)
+        probs = torch.sigmoid(logits / temperature)
 
     probs_np = probs.cpu().numpy()
     binary_np = (probs_np >= threshold).astype(int)
@@ -516,58 +363,65 @@ def save_results(results, output_path, label_names, original_frames=None, song_i
     print(f"Saved prediction results to {output_path}")
 
 def main():
-    # 1. 設定読み込み
+    # 1. 設定とデバイスの準備
     config = load_config("config.json")
     device = config["training"].get("device", "cpu")
+    
+    # config.json に "prediction_count": 10 のように記述がある想定
+    num_runs = config["predict"].get("prediction_count", 10) 
 
-    # 2. 正規化済み CSV を読み込み
+    # 2. 全データの読み込み（学習曲の特定とEmbedding次元の計算用）
     df_full = load_normalized_csvs(config)
-    print(f"DEBUG: df_full の全行数: {len(df_full)}")
-    print(f"DEBUG: フレーム重複チェック: {df_full[df_full['song_id']=='ring_my_bell']['frame'].duplicated().any()}")
-
-    # 3. モデル読み込み
-    # ここで df_full を渡すことで、学習時と同じ num_songs (3) を計算させます
+    
+    # 3. モデルの準備（一度だけ実行）
     model, train_songs, unknown_idx, feat_cols, label_cols = load_trained_model(
         config, df_full, device=device
     )
 
-    # 4. 推論対象のデータだけを抽出
+    # 4. 推論対象曲のリストアップ
     test_songs = config["data"].get("test_songs", [])
-    if len(test_songs) > 0:
-        # 学習に使っていないテスト曲だけの DataFrame を作成
-        df_target = df_full[df_full["song_id"].isin(test_songs)].copy()
-        print(f"推論対象曲 (test_songs): {test_songs}")
-    else:
-        # test_songs が空の場合は全曲を対象にする（検証用）
-        df_target = df_full.copy()
-        print("Warning: test_songs が空のため、全データを推論対象にします。")
+    if not test_songs:
+        print("推論対象 (test_songs) が空です。")
+        return
 
-    if df_target.empty:
-        raise ValueError("推論対象のデータが空です。config の test_songs またはデータパスを確認してください。")
+    # --- 監督、ここからがループ処理です ---
+    for sid in test_songs:
+        print(f"\nターゲット曲: {sid}")
+        
+        # その曲のデータだけを抽出
+        df_target = df_full[df_full["song_id"] == sid].copy()
+        if df_target.empty:
+            print(f"{sid} のデータが見つかりません。スキップします。")
+            continue
 
-    # 5. 推論用前処理
-    # 引数に feature_cols=feat_cols を追加し、動的解決したカラムを使わせます
-    # song_ids には学習時のリスト（train_songs）を渡し、未知曲判定をさせます
-    print("Running full-sequence prediction...")
-    X, song_idx, original_frames, song_id_list = preprocess_full_csv(
-        df_target, config, train_songs, unknown_idx, device=device
-    )
+        # 5. 推論用前処理（特徴量作成は曲ごとに1回でOK）
+        X, song_idx, original_frames, song_id_list = preprocess_full_csv(
+            df_target, config, train_songs, unknown_idx, device=device
+        )
 
-    # 6. 推論実行
-    # 動的に解決した label_cols を渡して、bin_target_... 等を出力対象
-    results = predict(model, X, song_idx, label_cols)
+        # 6. 指定回数だけ推論を実行して保存
+        for run_idx in range(1, num_runs + 1):
+            # 再現性を確保するためのシード固定（回数ごとに異なるが、毎回同じ結果になる）
+            # もし predict() 内で np.random を使っている場合、これで固定されます
+            np.random.seed(run_idx)
+            torch.manual_seed(run_idx)
 
-    # 7. 結果の保存
-    # LABEL_ROOT が存在しない場合は作成
-    os.makedirs(LABEL_ROOT, exist_ok=True)
-    
-    output_filename = LABEL_ROOT / "prediction_full.csv"
-    output_prediction_path = LABEL_ROOT / output_filename
-    
-    save_results(results, output_prediction_path, label_cols, original_frames, song_id_list)
+            run_id_str = f"{run_idx:02d}"
+            print(f"  └─ 推論中... [{run_id_str}/{num_runs}]")
 
-    print(f"\n=== 全工程完了 ===")
-    print(f"結果保存先: {output_prediction_path}")
+            # 既存の predict 関数をそのまま呼び出し
+            # ※ temperature 等の引数は、監督が書き換えた predict の定義に合わせて調整してください
+            results = predict(model, X, song_idx, label_cols)
+
+            # 7. 結果の保存（曲名と連番をファイル名に付与）
+            os.makedirs(LABEL_ROOT, exist_ok=True)
+            output_filename = f"predict_{sid}_{run_id_str}.csv"
+            output_path = LABEL_ROOT / output_filename
+            
+            # 既存の save_results 関数をそのまま呼び出し
+            save_results(results, output_path, label_cols, original_frames, song_id_list)
+
+    print(f"\n=== 全 {len(test_songs)} 曲 × {num_runs} 回の推論が完了しました ===")
 
 if __name__ == "__main__":
     main()

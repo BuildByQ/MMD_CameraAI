@@ -72,7 +72,7 @@ def load_model(model_path, config):
     except Exception as e:
         print(f"モデルのロードに失敗しました。詳細な理由は以下の通りです:")
         import traceback
-        traceback.print_exc() # これでエラーの「詳細（どの層が合わないか）」が見えます
+        traceback.print_exc()
         sys.exit(1)
 
 def load_config(config_path):
@@ -109,16 +109,13 @@ def load_config(config_path):
         sys.exit(1)
 
 def load_and_prepare_data(ins_path, mot_path, config):
-    print(f"データをロード中...")
+    print(f"データをロード中: {ins_path.name}") # パスオブジェクトとして受け取る
 
     df_ins = pd.read_csv(ins_path)
     df_mot = pd.read_csv(mot_path)
 
-    # --- 【重要】結合キーに song_id を追加 ---
-    # これにより、同じフレーム番号でも曲が違えば別物として扱われます
+    # 結合とソート
     df = pd.merge(df_ins, df_mot, on=['song_id', 'frame'], how='inner')
-    
-    # 結合後に「曲ごと」→「フレーム順」にソートを確実に
     df = df.sort_values(['song_id', 'frame']).reset_index(drop=True)
 
     # 接頭辞の正規化
@@ -128,12 +125,6 @@ def load_and_prepare_data(ins_path, mot_path, config):
     if 'bin_event_cut' not in df.columns and 'event_cut' in df.columns:
         df = df.rename(columns={'event_cut': 'bin_event_cut'})
     
-    # バリデーション
-    missing_cols = [c for c in config["x_cols"] if c not in df.columns]
-    if missing_cols:
-        print(f"エラー: 列が不足しています: {missing_cols}")
-        sys.exit(1)
-
     return df
 
 def inference(model, df, config, device):
@@ -165,14 +156,10 @@ def inference(model, df, config, device):
                 # 通常時の窓切り出し（直近 seq_len フレーム）
                 window = X_all[i - (seq_len - 1) : i + 1]
             
-            # --- テンソル変換とデバイス転送 ---
-            # [seq_len, feature] -> [batch(1), seq_len, feature]
             input_tensor = torch.tensor(window).unsqueeze(0).to(device)
             
-            # --- AIによる予測 ---
             pred = model(input_tensor) # 出力は [1, 14]
             
-            # 結果をCPUに戻してリストへ格納
             all_preds.append(pred.squeeze().cpu().numpy())
             
             # 進捗表示（1000フレームごとなど）
@@ -187,30 +174,49 @@ def main():
     config = load_config(CONFIG_PATH)
     model, device = load_model(MODEL_SAVE_PATH, config)
 
-    # 1. データのロード（この時点で正しい曲×フレームの組み合わせになる）
-    df_merged = load_and_prepare_data(INPUT_INS_PATH, INPUT_MOT_PATH, config)
+    # フォルダ内の director_*.csv をすべて取得
+    input_files = list(PRED01TO02_ROOT.glob("predict_*.csv"))
+    
+    if not input_files:
+        print(f"Error: 入力ファイルが {PRED01TO02_ROOT} に見つかりません。")
+        return
 
-    # 2. 【重要】曲ごとにループして推論・保存
-    for sid, df_song in df_merged.groupby("song_id", sort=False):
-        print(f"\n曲: {sid} のカメラ座標を生成中... ({len(df_song)} frames)")
-        
-        # 曲ごとに独立して推论（ウィンドウが曲を跨がない）
-        predictions = inference(model, df_song, config, device)
+    print(f"{len(input_files)} 件の指示書を処理します...")
 
-        # 3. 結果の保存
-        # 曲名を含んだ出力パスを作成
-        output_filename = f"prediction_{sid}.csv"
-        output_path = PRED02_ROOT / output_filename
+    for ins_path in input_files:
+        # 1. データのロード
+        df_merged = load_and_prepare_data(ins_path, INPUT_MOT_PATH, config)
         
-        # 保存用のDataFrame作成
-        df_out = pd.DataFrame(predictions, columns=config["y_cols"])
-        df_out.insert(0, 'frame', df_song['frame'].values)
-        df_out.insert(0, 'song_id', sid)
-        
-        df_out.to_csv(output_path, index=False, encoding="utf-8-sig")
-        print(f"保存完了: {output_path}")
+        if df_merged.empty:
+            print(f"警告: {ins_path.name} に対応するモーションデータが見つかりません。スキップします。")
+            continue
 
-    print(f"\n全曲のデバッグ実行完了")
+        # 2. 曲ごとにループして推論（1ファイルに複数曲ある可能性も考慮）
+        for sid, df_song in df_merged.groupby("song_id", sort=False):
+            print(f"曲: {sid} のカメラ座標を生成中... ({len(df_song)} frames)")
+            
+            # AI推論実行
+            predictions = inference(model, df_song, config, device)
+
+            # 3. 結果の保存
+            # 入力ファイル名に基づいた出力名にする (例: director_songA.csv -> final_camera_songA.csv)
+            out_name = ins_path.name.replace("director_", "final_camera_")
+            output_path = PRED02_ROOT / out_name
+            
+            df_out = pd.DataFrame(predictions, columns=config["y_cols"])
+            
+            # 元の演出フラグ（bin_系）を横結合して、後続のツールで使いやすくする
+            bin_cols = [c for c in df_song.columns if c.startswith('bin_')]
+            for bc in bin_cols:
+                df_out[bc] = df_song[bc].values
+                
+            df_out.insert(0, 'frame', df_song['frame'].values)
+            df_out.insert(0, 'song_id', sid)
+            
+            df_out.to_csv(output_path, index=False, encoding="utf-8-sig")
+            print(f"保存完了: {output_path.name}")
+
+    print(f"\nすべての処理が完了しました。出力先: {PRED02_ROOT}")
 
 if __name__ == "__main__":
     main()

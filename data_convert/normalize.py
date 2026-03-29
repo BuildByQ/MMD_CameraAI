@@ -1,10 +1,8 @@
-import os
 import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Union
-import librosa
+from typing import Dict, List, Tuple, Optional, Union, Any
 from tqdm import tqdm
 
 def normalize_features(
@@ -37,9 +35,9 @@ def normalize_features(
                 norm_params[key]['std']  = pd.Series(norm_params[key]['std'])
     else:
         norm_params = {
-            'camera': _calculate_normalization_params(data_root, 'camera'),
-            'motion': _calculate_normalization_params(data_root, 'motion'),
-            'audio': _calculate_normalization_params(data_root, 'audio')
+            'camera': _calculate_normalization_params(data_root.parent, 'camera'),
+            'motion': _calculate_normalization_params(data_root.parent, 'motion'),
+            'audio': _calculate_normalization_params(data_root.parent, 'audio')
         }
 
         # ★ JSON 保存用に dict に変換する
@@ -59,18 +57,20 @@ def normalize_features(
     motion_data = None
     audio_data = None
     label_data = None
+
+    synced_root = data_root
     
     try:
         # --- 【ステップ1：ラベル読み込みの独立化】 ---
         # ラベルデータは正規化関数を通さず、単に読み込むだけにします
-        label_dir = data_root / 'label_csv'
+        label_dir = data_root.parent / 'label_csv'
         if label_dir.exists():
             # _load_and_combine_data は単なるロードなのでこれだけでOK
             label_data = _load_and_combine_data(label_dir, 'label')
             print(f"✓ ラベルデータのロード完了: {len(label_data)}行")
 
         # カメラデータの読み込みと正規化
-        camera_dir = data_root / 'camera_interpolated'
+        camera_dir = synced_root / 'camera'
         if camera_dir.exists():
             camera_df = _load_and_combine_data(camera_dir, 'camera')
             # ここでカメラ側だけ正規化を適用
@@ -97,7 +97,7 @@ def normalize_features(
             print(f"✓ 正規化済みcamera(+ラベル)保存完了: {output_file}")
         
         # モーションデータの読み込みと正規化
-        motion_dir = data_root / 'motion_wide'
+        motion_dir = synced_root / 'motion'
         if motion_dir.exists():
             motion_df = _load_and_combine_data(motion_dir, 'motion')
             motion_data = {
@@ -112,7 +112,7 @@ def normalize_features(
             print(f"✓ 正規化済みmotion保存完了: {output_file}")
             
         # 音声データの正規化
-        audio_data = apply_audio_normalization(data_root, output_dir, norm_params['audio'])
+        audio_data = apply_audio_normalization(synced_root, output_dir, norm_params['audio'])
         
         # データの統合
         _integrate_data(camera_data, motion_data, audio_data, label_data, output_dir)
@@ -141,7 +141,7 @@ def apply_audio_normalization(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    audio_dir = data_root / 'wav_csv'
+    audio_dir = data_root / 'audio'
     if not audio_dir.exists():
         print("警告: 音声データディレクトリが見つかりません")
         return None
@@ -348,142 +348,6 @@ def _integrate_data(
         print(f"データの統合中にエラーが発生しました: {str(e)}")
         import traceback
         traceback.print_exc()
-
-def _normalize_dataframe(
-    df: pd.DataFrame,
-    norm_params: Dict[str, Dict[str, float]],
-    data_type: str
-) -> pd.DataFrame:
-    """
-    データフレームを正規化する
-    
-    Args:
-        df: 正規化対象のデータフレーム
-        norm_params: 正規化パラメータ
-        data_type: 'camera' または 'motion'
-        
-    Returns:
-        pd.DataFrame: 正規化されたデータフレーム
-    """
-    df_norm = df.copy()
-    
-    # データタイプに応じて列を選択
-    if data_type == 'camera':
-        pos_columns = [col for col in df.columns if col.endswith(('_x', '_y', '_z')) and not col.startswith('rot_')]
-        rot_columns = [col for col in df.columns if col.startswith('rot_')]
-    else:  # motion
-        pos_columns = [col for col in df.columns if col.endswith(('_pos_x', '_pos_y', '_pos_z'))]
-        rot_columns = [col for col in df.columns if col.endswith(('_rot_x', '_rot_y', '_rot_z', '_rot_w'))]
-    
-    # 位置情報の正規化
-    for col in pos_columns:
-        if col in norm_params['pos_means']:
-            mean = norm_params['pos_means'][col]
-            std = norm_params['pos_stds'][col]
-            if std > 1e-8:  # 0除算を防ぐ
-                df_norm[col] = (df_norm[col] - mean) / std
-    
-    # 回転情報の正規化
-    for col in rot_columns:
-        if col in norm_params['rot_means']:
-            mean = norm_params['rot_means'][col]
-            std = norm_params['rot_stds'][col]
-            if std > 1e-8:  # 0除算を防ぐ
-                df_norm[col] = (df_norm[col] - mean) / std
-    
-    return df_norm
-
-def _load_and_normalize_camera_data(
-    camera_dir: Path,
-    camera_params: Dict[str, Any]
-) -> Dict[str, pd.DataFrame]:
-    """カメラデータを読み込んで正規化する"""
-    camera_data = {}
-    for csv_file in camera_dir.glob("*.csv"):
-        try:
-            df = pd.read_csv(csv_file)
-            df_norm = apply_camera_normalization(df, camera_params)
-            camera_data[csv_file.stem] = df_norm
-        except Exception as e:
-            print(f"警告: {csv_file.name} の処理中にエラーが発生しました: {str(e)}")
-    return camera_data
-
-def _load_and_normalize_motion_data(
-    motion_dir: Path,
-    motion_params: Dict[str, Any]
-) -> Dict[str, pd.DataFrame]:
-    """モーションデータを読み込んで正規化する"""
-    motion_data = {}
-    for csv_file in motion_dir.glob("*.csv"):
-        try:
-            df = pd.read_csv(csv_file)
-            df_norm = apply_motion_normalization(df, motion_params)
-            motion_data[csv_file.stem] = df_norm
-        except Exception as e:
-            print(f"警告: {csv_file.name} の処理中にエラーが発生しました: {str(e)}")
-    return motion_data
-
-def _load_label_data(label_dir: Path) -> Dict[str, pd.DataFrame]:
-    """ラベルデータを読み込む"""
-    label_data = {}
-    for csv_file in label_dir.glob("*.csv"):
-        try:
-            df = pd.read_csv(csv_file)
-            label_data[csv_file.stem] = df
-        except Exception as e:
-            print(f"警告: {csv_file.name} の読み込み中にエラーが発生しました: {str(e)}")
-    return label_data
-
-def _merge_and_save_data(
-    camera_data: Optional[Dict[str, pd.DataFrame]],
-    motion_data: Optional[Dict[str, pd.DataFrame]],
-    label_data: Optional[Dict[str, pd.DataFrame]],
-    output_dir: Path
-) -> None:
-    """データを統合して保存する"""
-    # 全てのファイル名を収集
-    all_files = set()
-    if camera_data:
-        all_files.update(camera_data.keys())
-    if motion_data:
-        all_files.update(motion_data.keys())
-    if label_data:
-        all_files.update(label_data.keys())
-    
-    # 各ファイルごとに統合
-    for file_stem in all_files:
-        merged_data = []
-        
-        # カメラデータを追加
-        if camera_data and file_stem in camera_data:
-            df_cam = camera_data[file_stem]
-            # カラム名に接頭辞を付ける
-            df_cam = df_cam.add_prefix('camera_')
-            merged_data.append(df_cam)
-        
-        # モーションデータを追加
-        if motion_data and file_stem in motion_data:
-            df_motion = motion_data[file_stem]
-            # カラム名に接頭辞を付ける
-            df_motion = df_motion.add_prefix('motion_')
-            merged_data.append(df_motion)
-        
-        # ラベルデータを追加
-        if label_data and file_stem in label_data:
-            df_label = label_data[file_stem]
-            # カラム名に接頭辞を付ける
-            df_label = df_label.add_prefix('label_')
-            merged_data.append(df_label)
-        
-        # データを結合
-        if merged_data:
-            # インデックスをリセットして結合
-            dfs = [df.reset_index(drop=True) for df in merged_data]
-            merged_df = pd.concat(dfs, axis=1)
-            
-            # 保存
-            output_file = output_dir / f"{file_stem}_merged.csv"
-            merged_df.to_csv(output_file, index=False)
 
 def _load_and_combine_data(
     data_dir: Path,

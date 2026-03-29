@@ -4,17 +4,24 @@ import os
 import json
 import math
 from pathlib import Path
+import functools
+from concurrent.futures import ProcessPoolExecutor
+from tqdm import tqdm
+
+# --- パス設定 ---
+SCRIPT_DIR = Path(__file__).parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+DATA_ROOT = PROJECT_ROOT / 'data'
+ML_ROOT = PROJECT_ROOT / 'ml'
+CONFIG_PATH = ML_ROOT / "config.json"
 
 def load_config():
-    # スクリプトと同階層の config.json を読み込む
-    config_path = Path(__file__).parent / "config.json"
-    if not config_path.exists():
-        # mlディレクトリ直下を探すフォールバック
-        config_path = Path(__file__).parent.parent / "ml" / "config.json"
-    
-    with open(config_path, "r", encoding="utf-8") as f:
+    if not CONFIG_PATH.exists():
+        raise FileNotFoundError(f"Config not found at {CONFIG_PATH}")
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
+# 設定のグローバルロード
 CONFIG = load_config()
 VIRTUAL_BONE_DEFS = CONFIG.get("virtual_bone_definitions", {})
 ANCHOR_DEFS = CONFIG.get("anchor_definitions", {})
@@ -256,29 +263,76 @@ def detect_dynamics(cam, prev_cam, eye_pos, prev_eye_pos):
 
     return results
 
+def process_single_file(filename, camera_dir, motion_dir, output_dir):
+    """1つのファイルペアを処理する単位"""
+    cam_csv_path = camera_dir / filename
+    mot_csv_path = motion_dir / filename
+    output_path = output_dir / filename
+
+    if not mot_csv_path.exists():
+        return f"Skip (No Motion): {filename}"
+    
+    # 既存チェック
+    if output_path.exists():
+        return f"Skip (Done): {filename}"
+
+    try:
+        # 1. データの読み込みとマージ
+        data = load_motion_data(str(cam_csv_path), str(mot_csv_path))
+        projector = MMDCameraProjector()
+        processed_labels = []
+        prev_cam, prev_eye_pos = None, None
+
+        # 2. フレームごとのラベル計算
+        for frame_data in data:
+            cam = frame_data['camera']
+            bones = frame_data['bones']
+            eye_pos = projector.get_camera_eye_pos(cam)
+            
+            labels = {
+                'frame': frame_data['frame'],
+                **detect_target(cam, eye_pos, bones),
+                **detect_attitude(cam, eye_pos, bones),
+                **detect_proximity(cam, eye_pos, bones),
+                **detect_dynamics(cam, prev_cam, eye_pos, prev_eye_pos)
+            }
+            processed_labels.append(labels)
+            prev_cam, prev_eye_pos = cam, eye_pos
+
+        # 3. 保存
+        df_output = pd.DataFrame(processed_labels)
+        df_output.to_csv(output_path, index=False)
+        return f"Success: {filename}"
+    except Exception as e:
+        return f"Error: {filename} ({e})"
+
 def load_motion_data(camera_csv_path, motion_csv_path):
     df_cam = pd.read_csv(camera_csv_path)
     df_mot = pd.read_csv(motion_csv_path)
-    df_combined = pd.merge(df_cam, df_mot, on='frame', suffixes=('_cam', '_mot')).sort_values('frame')
+    # カラム重複を避けてマージ
+    df_combined = pd.merge(df_cam, df_mot, on='frame').sort_values('frame')
 
     # configから必要な全ボーン名を収集
     needed_bones = set()
     for info in ANCHOR_DEFS.values():
         for b in info.get("bones", []):
             needed_bones.add(b)
-            # 仮想ボーン名も計算して追加
             suffix = VIRTUAL_BONE_DEFS.get(b, {}).get("suffix", "前方")
             needed_bones.add(f"{b}{suffix}")
 
     combined_data = []
     for _, row in df_combined.iterrows():
-        cam_info = row.to_dict()
-        cam_info['pos'] = np.array([row['pos_x'], row['pos_y'], row['pos_z']])
-        cam_info['rot'] = np.array([row['rot_x'], row['rot_y'], row['rot_z']])
-        cam_info['dist'] = row['distance']
+        cam_info = {
+            'frame': row['frame'],
+            'pos': np.array([row['pos_x'], row['pos_y'], row['pos_z']]),
+            'rot': np.array([row['rot_x'], row['rot_y'], row['rot_z']]),
+            'dist': row['distance'],
+            'fov': row['fov']
+        }
         
         bones_info = {}
         for b_name in needed_bones:
+            # interpolate_motion_csv.py で生成したカラム名 (_w_x 等) を参照
             try:
                 bones_info[b_name] = {
                     'pos': np.array([row[f'{b_name}_w_x'], row[f'{b_name}_w_y'], row[f'{b_name}_w_z']])
@@ -316,18 +370,36 @@ def process_camera_csv(camera_csv_path, motion_csv_path, output_dir):
     print(f"  ✓ Saved: {output_path.name}")
 
 def main():
-    project_root = Path(__file__).parent.parent
-    camera_dir = project_root / "data" / "camera_interpolated"
-    motion_dir = project_root / "data" / "motion_wide"
-    output_dir = project_root / "data" / "label_csv"
+    print(f"[Step 6] Camera Labeling 開始")
     
-    os.makedirs(output_dir, exist_ok=True)
-    camera_files = sorted(list(camera_dir.glob("*.csv")))
+    camera_dir = DATA_ROOT / "camera_interpolated"
+    motion_dir = DATA_ROOT / "motion_wide"
+    output_dir = DATA_ROOT / "label_csv"
     
-    for cam_csv in camera_files:
-        mot_csv = motion_dir / cam_csv.name
-        if mot_csv.exists():
-            process_camera_csv(str(cam_csv), str(mot_csv), str(output_dir))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    camera_files = [f.name for f in camera_dir.glob("*.csv")]
+    
+    if not camera_files:
+        print("入力CSVが見つかりません。")
+        return
+
+    print(f"並列処理を開始します... (対象: {len(camera_files)}件)")
+    
+    with ProcessPoolExecutor() as executor:
+        worker = functools.partial(
+            process_single_file,
+            camera_dir=camera_dir,
+            motion_dir=motion_dir,
+            output_dir=output_dir
+        )
+        # 進捗表示付きで実行
+        results = list(tqdm(executor.map(worker, camera_files), total=len(camera_files), desc="Labeling"))
+
+    # エラー要約表示
+    for res in results:
+        if "Success" not in res and "Skip" not in res:
+            print(res)
+    print(f"ラベル生成が完了しました。")
 
 if __name__ == "__main__":
     main()
